@@ -86,19 +86,39 @@ export type Extraction = z.infer<typeof ExtractionSchema>;
 
 // --- Helpers ---
 
-/** Convert "MM/DD/YYYY" to "Month Day, Year". Returns null if the input is invalid. */
+/** Normalize a date string (MM/DD/YYYY or YYYY-MM-DD) to MM/DD/YYYY. Returns null if invalid. */
+function normalizeDate(dateStr: string): string | null {
+  if (!dateStr) return null;
+  if (dateStr.includes("/")) {
+    const parts = dateStr.split("/");
+    if (parts.length === 3 && parts.every((p) => !isNaN(parseInt(p, 10)))) return dateStr;
+    return null;
+  }
+  if (dateStr.includes("-")) {
+    const [year, month, day] = dateStr.split("-");
+    if (year && month && day && [year, month, day].every((p) => !isNaN(parseInt(p, 10)))) {
+      return `${month}/${day}/${year}`;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Convert a date string (MM/DD/YYYY or YYYY-MM-DD) to "Month Day, Year". Returns null if invalid. */
 export function formatDate(dateStr: string): string | null {
-  if (!dateStr || !dateStr.includes("/")) return null;
-  const [month, day, year] = dateStr.split("/");
+  const normalized = normalizeDate(dateStr);
+  if (!normalized) return null;
+  const [month, day, year] = normalized.split("/");
   const monthIndex = parseInt(month, 10) - 1;
   const dayNum = parseInt(day, 10);
   if (isNaN(monthIndex) || isNaN(dayNum) || !year || !MONTH_NAMES[monthIndex]) return null;
   return `${MONTH_NAMES[monthIndex]} ${dayNum}, ${year}`;
 }
 
-/** Parse "MM/DD/YYYY" into a Date */
+/** Parse a date string (MM/DD/YYYY or YYYY-MM-DD) into a Date */
 function parseDate(dateStr: string): Date {
-  const [month, day, year] = dateStr.split("/");
+  const normalized = normalizeDate(dateStr) ?? dateStr;
+  const [month, day, year] = normalized.split("/");
   return new Date(parseInt(year, 10), parseInt(month, 10) - 1, parseInt(day, 10));
 }
 
