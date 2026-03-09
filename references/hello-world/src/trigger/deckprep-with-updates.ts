@@ -113,24 +113,34 @@ export const deckprepWithUpdates = schemaTask({
     aeName: z.string().describe("Account Executive name"),
     seName: z.string().describe("SA name"),
     csLead: z.string().describe("SA Team Lead name"),
-    kickoffDate: z.string().optional().describe("Override kickoff date (MM/DD/YYYY)"),
+    kickoffDate: z.string().optional().describe("Override kickoff date (MM/DD/YYYY or YYYY-MM-DD)"),
     notionContent: z.string().describe("Notion intake page content (client name extracted from this)"),
-    slackChannel: z.string().describe("Slack channel ID for status updates"),
-    slackThreadTs: z.string().describe("Thread timestamp to post updates in"),
-    slackUserId: z.string().describe("Slack user ID who initiated the request"),
+    slackChannel: z.string().optional().describe("Slack channel ID for status updates"),
+    slackThreadTs: z.string().optional().describe("Thread timestamp to post updates in"),
+    slackUserId: z.string().optional().describe("Slack user ID who initiated the request"),
   }),
   retry: {
     maxAttempts: 1,
   },
   run: async (payload) => {
-    const { slackChannel, slackThreadTs, aeName } = payload;
+    const { slackChannel, slackThreadTs, slackUserId, aeName } = payload;
+    const hasSlack = !!(slackChannel && slackThreadTs);
 
     // Post initial status message (all steps pending)
-    const statusTs = await postSlackMessage(
-      slackChannel,
-      buildStatusText(0, 1),
-      slackThreadTs
-    );
+    let statusTs: string | undefined;
+    if (hasSlack) {
+      statusTs = await postSlackMessage(
+        slackChannel!,
+        buildStatusText(0, 1),
+        slackThreadTs
+      );
+    }
+
+    const updateStatus = async (completedUpTo: number, currentStep?: number, failedStep?: number) => {
+      if (hasSlack && statusTs) {
+        await updateSlackMessage(slackChannel!, statusTs, buildStatusText(completedUpTo, currentStep, failedStep));
+      }
+    };
 
     let completedUpTo = 0;
     let accessToken: string;
@@ -156,13 +166,13 @@ export const deckprepWithUpdates = schemaTask({
         customerTeam: extractedData.customerTeam.length,
       });
       completedUpTo = 1;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(1, 2));
+      await updateStatus(1, 2);
 
       // Step 2: Authenticate with Google
       logger.info("Step 2: Getting Google OAuth access token...");
       accessToken = await getGoogleAccessToken();
       completedUpTo = 2;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(2, 3));
+      await updateStatus(2, 3);
       logger.info("OAuth token acquired");
 
       // Step 3: Validate kickoff date
@@ -186,7 +196,7 @@ export const deckprepWithUpdates = schemaTask({
         }
       }
       completedUpTo = 3;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(3, 4));
+      await updateStatus(3, 4);
 
       // Step 4: Build replacement map
       logger.info("Step 4: Building replacement map...");
@@ -198,7 +208,7 @@ export const deckprepWithUpdates = schemaTask({
         notionLink
       );
       completedUpTo = 4;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(4, 5));
+      await updateStatus(4, 5);
       logger.info(`Built ${replacements.length} text replacements`);
 
       // Step 5: Look up Slack photos
@@ -208,7 +218,7 @@ export const deckprepWithUpdates = schemaTask({
       const csPhoto = findSlackPhoto(slackUsers, payload.csLead);
       const sePhoto = findSlackPhoto(slackUsers, payload.seName);
       completedUpTo = 5;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(5, 6));
+      await updateStatus(5, 6);
       logger.info("Slack photo lookup complete", {
         aePhoto: !!aePhoto,
         sePhoto: !!sePhoto,
@@ -223,7 +233,7 @@ export const deckprepWithUpdates = schemaTask({
         CUSTOMER_DOCUMENTS_FOLDER_ID
       );
       completedUpTo = 6;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(6, 7));
+      await updateStatus(6, 7);
       logger.info("Folder created", { folderId });
 
       // Step 7: Copy template deck
@@ -235,7 +245,7 @@ export const deckprepWithUpdates = schemaTask({
         folderId
       );
       completedUpTo = 7;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(7, 8));
+      await updateStatus(7, 8);
       logger.info("Deck copied", { deckId });
 
       // Step 8: Apply text & image replacements
@@ -282,7 +292,7 @@ export const deckprepWithUpdates = schemaTask({
 
       await batchUpdateSlides(accessToken, deckId, requests);
       completedUpTo = 8;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(8, 9));
+      await updateStatus(8, 9);
       logger.info("All replacements applied");
 
       // Step 9: Set Notion hyperlink on slide 11
@@ -316,7 +326,7 @@ export const deckprepWithUpdates = schemaTask({
         }
       }
       completedUpTo = 9;
-      await updateSlackMessage(slackChannel, statusTs, buildStatusText(9));
+      await updateStatus(9);
 
       // Post final summary message
       const deckUrl = `https://docs.google.com/presentation/d/${deckId}/edit`;
@@ -325,16 +335,18 @@ export const deckprepWithUpdates = schemaTask({
         ? formatDate(extractedData.kickoffDate) ?? "Not determined"
         : "Not determined";
 
-      await postSlackMessage(
-        slackChannel,
-        `:white_check_mark: *Kickoff deck ready!*\n\n` +
-          `*Client:* ${clientName}\n` +
-          `*Kickoff Date:* ${kickoffDisplay}\n` +
-          `*Deck:* <${deckUrl}|Open Deck>\n` +
-          `*Folder:* <${folderUrl}|Open Folder>\n\n` +
-          `cc <@${payload.slackUserId}>`,
-        slackThreadTs
-      );
+      if (hasSlack) {
+        await postSlackMessage(
+          slackChannel!,
+          `:white_check_mark: *Kickoff deck ready!*\n\n` +
+            `*Client:* ${clientName}\n` +
+            `*Kickoff Date:* ${kickoffDisplay}\n` +
+            `*Deck:* <${deckUrl}|Open Deck>\n` +
+            `*Folder:* <${folderUrl}|Open Folder>\n\n` +
+            (slackUserId ? `cc <@${slackUserId}>` : ""),
+          slackThreadTs
+        );
+      }
 
       logger.info("Deckprep with updates complete", { deckUrl, folderUrl });
 
@@ -346,22 +358,21 @@ export const deckprepWithUpdates = schemaTask({
         clientName,
       };
     } catch (error) {
-      // Update status message with failure indicator
-      const failedStep = completedUpTo + 1;
-      await updateSlackMessage(
-        slackChannel,
-        statusTs,
-        buildStatusText(completedUpTo, undefined, failedStep)
-      );
+      if (hasSlack) {
+        // Update status message with failure indicator
+        const failedStep = completedUpTo + 1;
+        await updateStatus(completedUpTo, undefined, failedStep);
 
-      // Post error details as a thread reply
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      await postSlackMessage(
-        slackChannel,
-        `:x: *Deck prep failed at step ${failedStep}* (${STEPS[failedStep - 1]?.name || "unknown"}):\n\`\`\`${errorMessage}\`\`\`\n\ncc <@${payload.slackUserId}>`,
-        slackThreadTs
-      );
+        // Post error details as a thread reply
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        await postSlackMessage(
+          slackChannel!,
+          `:x: *Deck prep failed at step ${failedStep}* (${STEPS[failedStep - 1]?.name || "unknown"}):\n\`\`\`${errorMessage}\`\`\`\n\n` +
+            (slackUserId ? `cc <@${slackUserId}>` : ""),
+          slackThreadTs
+        );
+      }
 
       throw error;
     }
