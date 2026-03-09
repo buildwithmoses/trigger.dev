@@ -545,6 +545,171 @@ export async function findTextRange(
   return null;
 }
 
+// --- Notion API ---
+
+/** Extract a Notion page ID from a URL or return as-is if already an ID */
+export function extractNotionPageId(urlOrId: string): string {
+  // Already a raw ID (32 hex chars with or without dashes)
+  const cleanId = urlOrId.replace(/-/g, "");
+  if (/^[a-f0-9]{32}$/i.test(cleanId)) return cleanId;
+
+  // Notion URL formats:
+  // https://www.notion.so/workspace/Page-Title-abc123def456...
+  // https://www.notion.so/abc123def456...
+  // https://notion.so/abc123def456...?v=...
+  const match = urlOrId.match(/([a-f0-9]{32})(?:\?|$)/i)
+    || urlOrId.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i);
+  if (match) return match[1].replace(/-/g, "");
+
+  // Try extracting the last 32 hex chars from a slug like "Page-Title-abc123..."
+  const slugMatch = urlOrId.match(/[a-f0-9]{32}/i);
+  if (slugMatch) return slugMatch[0];
+
+  throw new Error(`Could not extract Notion page ID from: ${urlOrId}`);
+}
+
+interface NotionBlock {
+  type: string;
+  [key: string]: any;
+}
+
+/** Fetch all blocks from a Notion page and convert to plain text */
+export async function fetchNotionPageContent(pageIdOrUrl: string): Promise<string> {
+  const notionToken = process.env.NOTION_API_TOKEN;
+  if (!notionToken) {
+    throw new Error("NOTION_API_TOKEN environment variable is not set");
+  }
+
+  const pageId = extractNotionPageId(pageIdOrUrl);
+  logger.info("Fetching Notion page content", { pageId });
+
+  // Fetch page title
+  const pageRes = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+    headers: {
+      Authorization: `Bearer ${notionToken}`,
+      "Notion-Version": "2022-06-28",
+    },
+  });
+
+  let pageTitle = "";
+  if (pageRes.ok) {
+    const pageData = (await pageRes.json()) as any;
+    const titleProp = Object.values(pageData.properties || {}).find(
+      (p: any) => p.type === "title"
+    ) as any;
+    if (titleProp?.title?.[0]?.plain_text) {
+      pageTitle = titleProp.title[0].plain_text;
+    }
+  }
+
+  // Recursively fetch all blocks
+  const blocks = await fetchAllBlocks(notionToken, pageId);
+  const text = blocksToText(blocks);
+
+  return pageTitle ? `# ${pageTitle}\n\n${text}` : text;
+}
+
+async function fetchAllBlocks(token: string, blockId: string): Promise<NotionBlock[]> {
+  const blocks: NotionBlock[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const url = `https://api.notion.com/v1/blocks/${blockId}/children?page_size=100${cursor ? `&start_cursor=${cursor}` : ""}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Notion-Version": "2022-06-28",
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Notion API error (${res.status}): ${text}`);
+    }
+
+    const data = (await res.json()) as { results: NotionBlock[]; has_more: boolean; next_cursor?: string };
+    blocks.push(...data.results);
+    cursor = data.has_more ? data.next_cursor : undefined;
+  } while (cursor);
+
+  // Fetch children for blocks that have them
+  for (const block of blocks) {
+    if (block.has_children) {
+      block._children = await fetchAllBlocks(token, block.id);
+    }
+  }
+
+  return blocks;
+}
+
+function richTextToPlain(richText: any[]): string {
+  if (!richText) return "";
+  return richText.map((t: any) => t.plain_text || "").join("");
+}
+
+function blocksToText(blocks: NotionBlock[], indent = ""): string {
+  const lines: string[] = [];
+
+  for (const block of blocks) {
+    const type = block.type;
+    const data = block[type];
+
+    switch (type) {
+      case "paragraph":
+        lines.push(indent + richTextToPlain(data?.rich_text));
+        break;
+      case "heading_1":
+        lines.push(`\n## ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "heading_2":
+        lines.push(`\n### ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "heading_3":
+        lines.push(`\n#### ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "bulleted_list_item":
+        lines.push(`${indent}- ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "numbered_list_item":
+        lines.push(`${indent}1. ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "to_do":
+        lines.push(`${indent}- [${data?.checked ? "x" : " "}] ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "toggle":
+        lines.push(`${indent}${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "callout":
+        lines.push(`\n> ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "quote":
+        lines.push(`\n> ${richTextToPlain(data?.rich_text)}`);
+        break;
+      case "divider":
+        lines.push("\n---\n");
+        break;
+      case "code":
+        lines.push(`\n\`\`\`${data?.language || ""}\n${richTextToPlain(data?.rich_text)}\n\`\`\``);
+        break;
+      case "table_row":
+        lines.push(indent + (data?.cells || []).map((cell: any[]) => richTextToPlain(cell)).join(" | "));
+        break;
+      default:
+        if (data?.rich_text) {
+          lines.push(indent + richTextToPlain(data.rich_text));
+        }
+        break;
+    }
+
+    // Render children with indentation
+    if (block._children) {
+      lines.push(blocksToText(block._children, indent + "  "));
+    }
+  }
+
+  return lines.join("\n");
+}
+
 // --- AI Extraction ---
 
 const EXTRACTION_PROMPT = `You are an AI data extraction specialist for AirOps client onboarding. Analyze the following client handoff transcript and extract structured data for a kickoff deck.
@@ -771,13 +936,14 @@ export function buildReplacements(
 export const kickoffDeckPrep = schemaTask({
   id: "kickoff-deck-prep",
   schema: z.object({
-    transcript: z.string().describe("Client handoff document text"),
+    transcript: z.string().optional().describe("Client handoff document text (alternative to notionUrl)"),
+    notionUrl: z.string().optional().describe("Notion page URL or ID to fetch content from"),
     seName: z.string().describe("Solutions Engineer name"),
     csLead: z.string().describe("CS Lead name"),
     kickoffDate: z
       .string()
       .optional()
-      .describe("Override kickoff date (MM/DD/YYYY). If omitted, found from calendar/email/transcript."),
+      .describe("Override kickoff date (MM/DD/YYYY or YYYY-MM-DD). If omitted, found from calendar/email/transcript."),
     notionLink: z
       .string()
       .optional()
@@ -789,7 +955,16 @@ export const kickoffDeckPrep = schemaTask({
   run: async (payload) => {
     // Step 1: Extract structured data from transcript
     logger.info("Step 1: Extracting structured data from transcript...");
-    const extractedData = await extractFromTranscript(payload.transcript);
+    let transcript = payload.transcript;
+    if (payload.notionUrl && !transcript) {
+      logger.info("Fetching content from Notion page...", { notionUrl: payload.notionUrl });
+      transcript = await fetchNotionPageContent(payload.notionUrl);
+      logger.info("Fetched Notion page content", { length: transcript.length });
+    }
+    if (!transcript) {
+      throw new Error("Either notionUrl or transcript must be provided");
+    }
+    const extractedData = await extractFromTranscript(transcript);
     logger.info("Extraction complete", {
       clientName: extractedData.clientName,
       kickoffDate: extractedData.kickoffDate,

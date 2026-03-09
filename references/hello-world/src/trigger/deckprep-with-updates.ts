@@ -13,6 +13,7 @@ import {
   findTextRange,
   buildReplacements,
   formatDate,
+  fetchNotionPageContent,
   TEMPLATE_DECK_ID,
   CUSTOMER_DOCUMENTS_FOLDER_ID,
   SLIDE3_IMAGE_IDS,
@@ -114,7 +115,8 @@ export const deckprepWithUpdates = schemaTask({
     seName: z.string().describe("SA name"),
     csLead: z.string().describe("SA Team Lead name"),
     kickoffDate: z.string().optional().describe("Override kickoff date (MM/DD/YYYY or YYYY-MM-DD)"),
-    notionContent: z.string().describe("Notion intake page content (client name extracted from this)"),
+    notionUrl: z.string().optional().describe("Notion page URL or ID to fetch content from"),
+    notionContent: z.string().optional().describe("Notion intake page content (alternative to notionUrl)"),
     slackChannel: z.string().optional().describe("Slack channel ID for status updates"),
     slackThreadTs: z.string().optional().describe("Thread timestamp to post updates in"),
     slackUserId: z.string().optional().describe("Slack user ID who initiated the request"),
@@ -150,7 +152,16 @@ export const deckprepWithUpdates = schemaTask({
     try {
       // Step 1: Extract structured data from Notion content
       logger.info("Step 1: Extracting structured data from Notion content...");
-      const extractedData = await extractFromTranscript(payload.notionContent);
+      let notionContent = payload.notionContent;
+      if (payload.notionUrl && !notionContent) {
+        logger.info("Fetching content from Notion page...", { notionUrl: payload.notionUrl });
+        notionContent = await fetchNotionPageContent(payload.notionUrl);
+        logger.info("Fetched Notion page content", { length: notionContent.length });
+      }
+      if (!notionContent) {
+        throw new Error("Either notionUrl or notionContent must be provided");
+      }
+      const extractedData = await extractFromTranscript(notionContent);
       // Override AE name with the one selected in the form
       extractedData.aeName = aeName;
       // Clean client name: take only the main name (before parentheses, commas, "and", etc.)
@@ -200,7 +211,7 @@ export const deckprepWithUpdates = schemaTask({
 
       // Step 4: Build replacement map
       logger.info("Step 4: Building replacement map...");
-      const notionLink = payload.notionContent || undefined;
+      const notionLink = payload.notionUrl || undefined;
       const replacements = buildReplacements(
         extractedData,
         payload.seName,
