@@ -322,7 +322,7 @@ export const deckprepWithUpdates = schemaTask({
       const deckUrl = `https://docs.google.com/presentation/d/${deckId}/edit`;
       const folderUrl = `https://drive.google.com/drive/folders/${folderId}`;
       const kickoffDisplay = extractedData.kickoffDate
-        ? formatDate(extractedData.kickoffDate)
+        ? formatDate(extractedData.kickoffDate) ?? "Not determined"
         : "Not determined";
 
       await postSlackMessage(

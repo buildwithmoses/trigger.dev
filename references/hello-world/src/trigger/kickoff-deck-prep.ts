@@ -86,11 +86,13 @@ export type Extraction = z.infer<typeof ExtractionSchema>;
 
 // --- Helpers ---
 
-/** Convert "MM/DD/YYYY" to "Month Day, Year" */
-export function formatDate(dateStr: string): string {
+/** Convert "MM/DD/YYYY" to "Month Day, Year". Returns null if the input is invalid. */
+export function formatDate(dateStr: string): string | null {
+  if (!dateStr || !dateStr.includes("/")) return null;
   const [month, day, year] = dateStr.split("/");
   const monthIndex = parseInt(month, 10) - 1;
   const dayNum = parseInt(day, 10);
+  if (isNaN(monthIndex) || isNaN(dayNum) || !year || !MONTH_NAMES[monthIndex]) return null;
   return `${MONTH_NAMES[monthIndex]} ${dayNum}, ${year}`;
 }
 
@@ -612,7 +614,9 @@ export function buildReplacements(
   // Kickoff date on slide 1 (template has "December 11, 2026")
   if (data.kickoffDate) {
     const formattedKickoff = formatDate(data.kickoffDate);
-    replacements.push({ find: "December 11, 2026", replaceWith: formattedKickoff });
+    if (formattedKickoff) {
+      replacements.push({ find: "December 11, 2026", replaceWith: formattedKickoff });
+    }
   }
 
   // Use case placeholders
